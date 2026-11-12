@@ -1,0 +1,163 @@
+name: Bootstrap Nx (one-time)
+
+on:
+  push:
+    branches:
+      - chore/nx-task-runner
+    paths:
+      - .github/workflows/bootstrap-nx.yml
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Generate new integrated Nx workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          pnpm dlx create-nx-workspace@24.0.6 gym-app-web-generated \
+            --preset=next \
+            --appName=web \
+            --workspaceType=integrated \
+            --packageManager=pnpm \
+            --nextAppDir=true \
+            --nextSrcDir=true \
+            --style=css \
+            --linter=oxlint \
+            --unitTestRunner=vitest \
+            --e2eTestRunner=playwright \
+            --formatter=prettier \
+            --nxCloud=skip \
+            --skipGit \
+            --interactive=false \
+            --aiAgents=none
+          test -f "$RUNNER_TEMP/gym-app-web-generated/nx.json"
+          test -f "$RUNNER_TEMP/gym-app-web-generated/pnpm-lock.yaml"
+          test -d "$RUNNER_TEMP/gym-app-web-generated/apps/web"
+
+      - name: Replace starter files with generated monorepo
+        shell: bash
+        run: |
+          set -euo pipefail
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf -- '{}' +
+          cp -a "$RUNNER_TEMP/gym-app-web-generated/." "$GITHUB_WORKSPACE/"
+          printf '24\n' > .node-version
+          mkdir -p .github/workflows
+
+          cat > .github/workflows/ci.yml <<'YAML'
+          name: CI
+
+          on:
+            pull_request:
+              branches: [main]
+            push:
+              branches: [main]
+
+          permissions:
+            contents: read
+
+          concurrency:
+            group: ci-${{ github.workflow }}-${{ github.ref }}
+            cancel-in-progress: true
+
+          jobs:
+            required-gates:
+              name: Nx quality gates
+              runs-on: ubuntu-latest
+              timeout-minutes: 20
+              env:
+                NEXT_TELEMETRY_DISABLED: "1"
+                NX_DAEMON: "false"
+              steps:
+                - uses: actions/checkout@v4
+                - uses: pnpm/action-setup@v4
+                  with:
+                    version: 10.34.9
+                - uses: actions/setup-node@v4
+                  with:
+                    node-version: 24
+                    cache: pnpm
+                - name: Install (frozen lockfile)
+                  run: pnpm install --frozen-lockfile
+                - name: Show Nx projects
+                  run: pnpm exec nx show projects
+                - name: Lint
+                  run: pnpm exec nx run web:lint
+                - name: Typecheck
+                  run: pnpm exec nx run web:typecheck
+                - name: Build
+                  run: pnpm exec nx run web:build
+          YAML
+
+          cat > README.md <<'MARKDOWN'
+          # Gym App — Web
+
+          Nx monorepo for the Gym App frontend, starting with a Next.js App Router application.
+
+          ## Stack
+
+          - Node.js 24 and pnpm 10.34.9
+          - Nx 24 and Next.js 16 (App Router)
+          - TypeScript, Oxlint and Prettier
+          - Vitest and Playwright scaffolding
+
+          ## Development
+
+          ```bash
+          pnpm install --frozen-lockfile
+          pnpm exec nx dev web
+          ```
+
+          ## Quality gates
+
+          ```bash
+          pnpm exec nx run web:lint
+          pnpm exec nx run web:typecheck
+          pnpm exec nx run web:build
+          ```
+
+          The web application lives under `apps/web`. More frontend applications and shared packages will be introduced through separate PRs.
+
+          The NestJS API stays in its own repository: [gym-api-nestjs](https://github.com/sauron9521/gym-api-nestjs).
+          MARKDOWN
+
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = 'apps/web/project.json';
+          const data = fs.existsSync(path) ? JSON.parse(fs.readFileSync(path, 'utf8')) : {};
+          data.name = 'web';
+          data.targets ??= {};
+          data.targets.typecheck = {
+            executor: 'nx:run-commands',
+            cache: true,
+            options: {
+              cwd: 'apps/web',
+              command: 'pnpm exec next typegen && pnpm exec tsc --noEmit -p tsconfig.json'
+            }
+          };
+          fs.writeFileSync(path, JSON.stringify(data, null, 2) + '\n');
+          NODE
+
+          git status --short
+          git add -A
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: bootstrap Nx monorepo with pnpm and Next.js"
+          git push origin HEAD:chore/nx-task-runner
